@@ -97,15 +97,26 @@ def main():
 
     """
     ====================================
-    Manage GEE assets - MODIFIED for new project structure
+    Manage GEE assets
+    You can check these assets on
+    https://code.earthengine.google.com/
     ====================================
     """
-    # Skip asset management for now to avoid errors
-    print("Skipping asset management - using direct export to Drive")
-    
-    # Set up basic folder structure (will be created during export)
-    parent_folder = f"projects/sar-opt-fusion-project/assets"
-    subasset_folder = f"{parent_folder}/{PROJECT_TITLE}"
+    parent_folder = "projects/earthengine-legacy/assets/users/" + GEE_USERNAME
+    subasset_folder = parent_folder + '/' + PROJECT_TITLE
+    assets = ee.data.listAssets({'parent': parent_folder})['assets']
+    asset_names = [asset['name'].split('/')[-1] for asset in assets]
+
+    if PROJECT_TITLE in asset_names:
+        if CLEAR_EXISTING:
+            subassets = ee.data.listAssets(
+                {'parent': subasset_folder})['assets']
+            for subasset in subassets:
+                ee.data.deleteAsset(subasset['name'])
+            ee.data.deleteAsset(subasset_folder)
+            ee.data.createAsset({'type': 'Folder'}, subasset_folder)
+    else:
+        ee.data.createAsset({'type': 'Folder'}, subasset_folder)
 
     """
     ==========================
@@ -411,9 +422,19 @@ def main():
     rlr_image = robust_linear_regression.select(['coefficients'])\
         .arrayFlatten(band_names).rename(['constant'] + indep_variables)
 
-    # Skip asset export for RLR to avoid errors
     if EXPORT_RLR:
-        print("Skipping RLR asset export - keeping results in memory")
+        """Trained model is exported to GEE asset to save the previous computation before
+        the next heavy computation to avoid exceeding GEE's computation power"""
+        subassets = ee.data.listAssets({'parent': subasset_folder})['assets']
+        subasset_names = [asset['name'].split('/')[-1] for asset in subassets]
+        rlrname = 'rlr_image' + nameSuffix
+        rlrID = subasset_folder + '/' + rlrname
+
+        if rlrname not in subasset_names:
+            task = utilities.export_image_toasset(
+                rlr_image, AOI, rlrID, description='rlr_image')
+            check_task_status(task)
+        rlr_image = ee.Image(rlrID).select(['constant'] + indep_variables)
 
     def MLR_predict(img):
         """ Step7: Apply trained Multiple Linear Regression (MLR) model for prediction"""
@@ -434,16 +455,44 @@ def main():
     Post process including PCA smoothing and spatial stardardization
     ================================================================
     """
-    # Step 8 - Skip PCA smoothing to avoid memory issues
+    # Step 8
     if PCA_SMOOTH:
-        print("PCA smoothing disabled to avoid memory issues")
-        NDVI_smoothed = opt_SAR_outputs.select('NDVI_pred').toBands()
+        NDVI_smoothed = GEE_funcs.Temporal_PCA(
+            opt_SAR_outputs.select('NDVI_pred'),
+            AOI,
+            opt_SAR_outputs.size().multiply(PCA_COMPONENT_RATIO).floor().int(),
+            10)
     else:
         NDVI_smoothed = opt_SAR_outputs.select('NDVI_pred').toBands()
 
-    # Skip PCA asset export
     if EXPORT_PCA:
-        print("Skipping PCA asset export - keeping results in memory")
+        """Smoothed NDVI images are exported to GEE asset to save the previous computation before
+        the next heavy computation to avoid exceeding GEE's computation power"""
+        if OPTICAL_MISSION == 'S2':
+            S2_ids = NDVI_smoothed.bandNames()
+
+            def cat_S2_id(element):
+                """Concat S2 ids with S2 as initials"""
+                return ee.String('S2_').cat(element)
+            S2_ids_new = S2_ids.map(cat_S2_id)
+            NDVI_smoothed = NDVI_smoothed.select(S2_ids, S2_ids_new)
+
+        subassets = ee.data.listAssets({'parent': subasset_folder})['assets']
+        subasset_names = [asset['name'].split('/')[-1] for asset in subassets]
+        smoothed_name = 'smoothedImage' + nameSuffix
+        smoothed_id = subasset_folder + '/' + smoothed_name
+
+        if smoothed_name not in subasset_names:
+            task = utilities.export_image_toasset(
+                NDVI_smoothed,
+                AOI,
+                smoothed_id,
+                description='Smoothed NDVI')
+            check_task_status(task)
+
+        NDVI_smoothed = ee.Image(smoothed_id)
+        if OPTICAL_MISSION == 'S2':
+            NDVI_smoothed = NDVI_smoothed.select(S2_ids_new, S2_ids)
 
     # Step 9&10
     NDVI_calibrated, NDVI_filled = GEE_funcs.post_process(

@@ -6,7 +6,7 @@ Created on Thu Oct 14 15:02:10 2021
 """
 import ee
 import time
-ee.Initialize()
+ee.Initialize(project='sar-opt-fusion-project')
 
 
 def prepare_optical(optical_collection, AOI, optical_mission):
